@@ -150,12 +150,14 @@ data MessageSetMember =
 newtype Offset = Offset Int64 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
 
 newtype Message =
-  Message { _messageFields :: (Crc, MagicByte, Attributes, Key, Value) }
-  deriving (Show, Eq, Deserializable)
+  Message { _messageFields :: (Crc, MagicByte, Attributes, Maybe Timestamp, Key, Value) }
+  deriving (Show, Eq)
 
 newtype Crc = Crc Int32 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
 newtype MagicByte = MagicByte Int8 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
 newtype Attributes = Attributes Int8 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
+
+newtype Timestamp = Timestamp Int64 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
 
 newtype Key = Key { _keyBytes :: Maybe KafkaBytes } deriving (Show, Eq)
 newtype Value = Value { _valueBytes :: Maybe KafkaBytes } deriving (Show, Eq)
@@ -319,10 +321,26 @@ instance Serializable MessageSetMember where
       where msize = fromIntegral $ B.length $ runPut $ serialize msg :: Int32
 
 instance Serializable Message where
-  serialize (Message (_, magic, attrs, k, v)) = do
-    let m = runPut $ serialize magic >> serialize attrs >> serialize k >> serialize v
+  serialize (Message (_, magic, attrs, ts, k, v)) = do
+    let m = runPut $ serialize magic >> serialize attrs >> serializeTs ts >> serialize k >> serialize v
+        serializeTs Nothing
+          | magic == 0 = pure ()
+          | otherwise = fail "serialize: expected timestamp"
+        serializeTs (Just ts')
+          | magic == 0 = fail "serialize: unexpected timestamp"
+          | otherwise = serialize ts'
     putWord32be (crc32 m)
     putByteString m
+
+instance Deserializable Message where
+  deserialize = do
+    crc <- deserialize
+    magic <- deserialize
+    attrs <- deserialize
+    ts <- if magic == 0 then pure Nothing else fmap Just deserialize
+    k <- deserialize
+    v <- deserialize
+    pure (Message (crc, magic, attrs, ts, k, v))
 
 instance (Serializable a) => Serializable [a] where
   serialize xs = do
@@ -338,6 +356,8 @@ instance (Serializable a, Serializable b, Serializable c, Serializable d) => Ser
   serialize (w, x, y, z) = serialize w >> serialize x >> serialize y >> serialize z
 instance (Serializable a, Serializable b, Serializable c, Serializable d, Serializable e) => Serializable ((,,,,) a b c d e) where
   serialize (v, w, x, y, z) = serialize v >> serialize w >> serialize x >> serialize y >> serialize z
+instance (Serializable a, Serializable b, Serializable c, Serializable d, Serializable e, Serializable f) => Serializable ((,,,,,) a b c d e f) where
+  serialize (u, v, w, x, y, z) = serialize u >> serialize v >> serialize w >> serialize x >> serialize y >> serialize z
 
 instance Deserializable MessageSet where
   deserialize = do
@@ -407,6 +427,8 @@ instance (Deserializable a, Deserializable b, Deserializable c, Deserializable d
   deserialize = liftM4 (,,,) deserialize deserialize deserialize deserialize
 instance (Deserializable a, Deserializable b, Deserializable c, Deserializable d, Deserializable e) => Deserializable ((,,,,) a b c d e) where
   deserialize = liftM5 (,,,,) deserialize deserialize deserialize deserialize deserialize
+instance (Deserializable a, Deserializable b, Deserializable c, Deserializable d, Deserializable e, Deserializable f) => Deserializable ((,,,,,) a b c d e f) where
+  deserialize = (,,,,,) <$> deserialize <*> deserialize <*> deserialize <*> deserialize <*> deserialize <*> deserialize
 
 instance Deserializable Int64 where deserialize = fmap fromIntegral getWord64be
 instance Deserializable Int32 where deserialize = fmap fromIntegral getWord32be
@@ -445,6 +467,8 @@ makeLenses ''MessageSetMember
 makeLenses ''Offset
 
 makeLenses ''Message
+
+makeLenses ''Timestamp
 
 makeLenses ''Key
 makeLenses ''Value
@@ -498,14 +522,17 @@ messageSetByPartition p = keyed p . _4 . messageSetMembers . folded
 fetchResponseMessageMembers :: Fold FetchResponse MessageSetMember
 fetchResponseMessageMembers = fetchResponseMessages . messageSetMembers . folded
 
+messageTimestamp :: Lens' Message (Maybe Timestamp)
+messageTimestamp = messageFields . _4
+
 messageKey :: Lens' Message Key
-messageKey = messageFields . _4
+messageKey = messageFields . _5
 
 messageKeyBytes :: Fold Message ByteString
 messageKeyBytes = messageKey . keyBytes . folded . kafkaByteString
 
 messageValue :: Lens' Message Value
-messageValue = messageFields . _5
+messageValue = messageFields . _6
 
 payload :: Fold Message ByteString
 payload = messageValue . valueBytes . folded . kafkaByteString
