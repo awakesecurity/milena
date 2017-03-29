@@ -103,8 +103,12 @@ defaultMessageAttributes = 0
 
 -- | Construct a message from a string of bytes using default attributes.
 makeMessage :: ByteString -> Message
-makeMessage m = Message (defaultMessageCrc, defaultMessageMagicByte, defaultMessageAttributes, defaultMessageKey, Value (Just (KBytes m)))
+makeMessage m = Message (defaultMessageCrc, defaultMessageMagicByte, defaultMessageAttributes, Nothing, defaultMessageKey, Value (Just (KBytes m)))
 
 -- | Construct a message from a string of bytes using default attributes.
 makeKeyedMessage :: ByteString -> ByteString -> Message
-makeKeyedMessage k m = Message (defaultMessageCrc, defaultMessageMagicByte, defaultMessageAttributes, Key (Just (KBytes k)), Value (Just (KBytes m)))
+makeKeyedMessage k m = Message (defaultMessageCrc, defaultMessageMagicByte, defaultMessageAttributes, Nothing, Key (Just (KBytes k)), Value (Just (KBytes m)))
+
+-- | Construct a message from a string of bytes, including a timestamp
+makeMessageWithTimestamp :: Timestamp -> ByteString -> Message
+makeMessageWithTimestamp ts m = Message (defaultMessageCrc, 1, defaultMessageAttributes, Just ts, defaultMessageKey, Value (Just (KBytes m)))

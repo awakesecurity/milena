@@ -31,10 +31,15 @@ specs = do
         stateWaitSize .= 1
         stateWaitTime .= 1000
       byteMessages = fmap (TopicAndMessage topic . makeMessage . B.pack)
+      byteMessagesWithTs = fmap (TopicAndMessage topic . makeMessageWithTimestamp 1234 . B.pack)
 
   describe "can talk to local Kafka server" $ do
     prop "can produce messages" $ \ms -> do
       result <- run . produceMessages $ byteMessages ms
+      result `shouldSatisfy` isRight
+
+    prop "can produce messages with timestamps" $ \ms -> do
+      result <- run . produceMessages $ byteMessagesWithTs ms
       result `shouldSatisfy` isRight
 
     prop "can produce multiple messages" $ \(ms, ms') -> do
