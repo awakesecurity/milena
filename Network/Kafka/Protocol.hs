@@ -325,9 +325,9 @@ instance Serializable Message where
     let m = runPut $ serialize magic >> serialize attrs >> serializeTs ts >> serialize k >> serialize v
         serializeTs Nothing
           | magic == 0 = pure ()
-          | otherwise = fail "serialize: expected timestamp"
+          | otherwise = error "serialize: expected timestamp"
         serializeTs (Just ts')
-          | magic == 0 = fail "serialize: unexpected timestamp"
+          | magic == 0 = error "serialize: unexpected timestamp"
           | otherwise = serialize ts'
     putWord32be (crc32 m)
     putByteString m
