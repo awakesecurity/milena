@@ -27,7 +27,7 @@ import Numeric.Lens
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as LB (fromStrict, toStrict)
 import qualified Codec.Compression.GZip as GZip (compress, decompress)
-import qualified Network
+import qualified Network.Socket as Network
 
 data ReqResp a where
   MetadataRR :: MonadIO m => MetadataRequest -> ReqResp (m MetadataResponse)
@@ -887,5 +887,5 @@ findPartition p = filtered (view $ partitionId . to (== p))
 hostString :: Lens' Host String
 hostString = hostKString . kString . unpackedChars
 
-portId :: IndexPreservingGetter Port Network.PortID
-portId = portInt . to fromIntegral . to Network.PortNumber
+portNumber :: IndexPreservingGetter Port Network.PortNumber
+portNumber = portInt . to fromIntegral

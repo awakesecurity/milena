@@ -4,7 +4,7 @@ import Prelude
 
 -- base
 import Control.Applicative
-import Control.Exception (Exception, IOException)
+import Control.Exception (Exception, IOException, bracketOnError)
 import qualified Data.List.NonEmpty as NE
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Monoid ((<>))
@@ -24,7 +24,7 @@ import qualified Data.Pool as Pool
 import qualified Data.Map as M
 import Data.Set (Set)
 import qualified Data.Set as Set
-import qualified Network
+import qualified Network.Socket as Network
 
 -- local
 import Network.Kafka.Protocol
@@ -347,7 +347,22 @@ withAddressHandle address kafkaAction = do
     where
       mkPool :: KafkaAddress -> IO (Pool.Pool Handle)
       mkPool a = Pool.createPool (createHandle a) hClose 1 10 1
-        where createHandle (h, p) = Network.connectTo (h ^. hostString) (p ^. portId)
+        where createHandle (h, p) = connectTo (h ^. hostString) (p ^. portNumber)
+
+      connectTo :: Network.HostName -> Network.PortNumber -> IO Handle
+      connectTo host port = do
+        let hints = Network.defaultHints { Network.addrSocketType = Network.Stream }
+        addrs <- Network.getAddrInfo (Just hints) (Just host) (Just $ show port)
+        case addrs of
+          [] -> throwError $ userError $ "could not resolve " ++ host
+          (addr:_) ->
+            bracketOnError
+              (Network.socket (Network.addrFamily addr) (Network.addrSocketType addr) (Network.addrProtocol addr))
+              Network.close
+              (\sock -> do
+                  Network.connect sock (Network.addrAddress addr)
+                  Network.socketToHandle sock ReadWriteMode
+              )
 
 broker2address :: Broker -> KafkaAddress
 broker2address broker = (,) (broker ^. brokerHost) (broker ^. brokerPort)
