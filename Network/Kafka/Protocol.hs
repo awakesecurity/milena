@@ -1,30 +1,32 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE Rank2Types #-}
-
 module Network.Kafka.Protocol
   ( module Network.Kafka.Protocol
   ) where
 
+import Prelude hiding ((.), id)
+
+-- base
 import Control.Applicative
 import Control.Category (Category(..))
 import Control.Exception (Exception)
-import Control.Lens
 import Control.Monad (replicateM, liftM2, liftM3, liftM4, liftM5, unless)
+import Data.Bits ((.&.))
+import Data.Int
+import GHC.Exts (IsString(..))
+import GHC.Generics (Generic)
+import System.IO
+
+-- Hackage
+import Control.Lens
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.ByteString.Char8 (ByteString)
 import Data.ByteString.Lens (unpackedChars)
 import Data.Digest.CRC32
-import Data.Int
 import Data.Serialize.Get
 import Data.Serialize.Put
-import GHC.Exts (IsString(..))
-import System.IO
 import Numeric.Lens
-import Prelude hiding ((.), id)
 import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy.Char8 as LB (fromStrict, toStrict)
+import qualified Codec.Compression.GZip as GZip (compress, decompress)
 import qualified Network
 
 data ReqResp a where
@@ -32,6 +34,11 @@ data ReqResp a where
   ProduceRR  :: MonadIO m => ProduceRequest  -> ReqResp (m ProduceResponse)
   FetchRR    :: MonadIO m => FetchRequest    -> ReqResp (m FetchResponse)
   OffsetRR   :: MonadIO m => OffsetRequest   -> ReqResp (m OffsetResponse)
+  HeartbeatRR :: MonadIO m => HeartbeatRequest -> ReqResp (m HeartbeatResponse)
+  TopicsRR   :: MonadIO m => CreateTopicsRequest -> ReqResp (m CreateTopicsResponse)
+  DeleteTopicsRR :: MonadIO m => DeleteTopicsRequest -> ReqResp (m DeleteTopicsResponse)
+  OffsetCommitRR :: MonadIO m => OffsetCommitRequest -> ReqResp (m OffsetCommitResponse)
+  OffsetFetchRR :: MonadIO m => OffsetFetchRequest -> ReqResp (m OffsetFetchResponse)
 
 doRequest' :: (Deserializable a, MonadIO m) => CorrelationId -> Handle -> Request -> m (Either String a)
 doRequest' correlationId h r = do
@@ -53,6 +60,11 @@ doRequest clientId correlationId h (MetadataRR req) = doRequest' correlationId h
 doRequest clientId correlationId h (ProduceRR req)  = doRequest' correlationId h $ Request (correlationId, clientId, ProduceRequest req)
 doRequest clientId correlationId h (FetchRR req)    = doRequest' correlationId h $ Request (correlationId, clientId, FetchRequest req)
 doRequest clientId correlationId h (OffsetRR req)   = doRequest' correlationId h $ Request (correlationId, clientId, OffsetRequest req)
+doRequest clientId correlationId h (HeartbeatRR req)= doRequest' correlationId h $ Request (correlationId, clientId, HeartbeatRequest req)
+doRequest clientId correlationId h (TopicsRR req)   = doRequest' correlationId h $ Request (correlationId, clientId, CreateTopicsRequest req)
+doRequest clientId correlationId h (DeleteTopicsRR req)   = doRequest' correlationId h $ Request (correlationId, clientId, DeleteTopicsRequest req)
+doRequest clientId correlationId h (OffsetCommitRR req) = doRequest' correlationId h $ Request (correlationId, clientId, OffsetCommitRequest req)
+doRequest clientId correlationId h (OffsetFetchRR req) = doRequest' correlationId h $ Request (correlationId, clientId, OffsetFetchRequest req)
 
 class Serializable a where
   serialize :: a -> Put
@@ -60,12 +72,12 @@ class Serializable a where
 class Deserializable a where
   deserialize :: Get a
 
-newtype GroupCoordinatorResponse = GroupCoordinatorResp (KafkaError, Broker) deriving (Show, Eq, Deserializable)
+newtype GroupCoordinatorResponse = GroupCoordinatorResp (KafkaError, Broker) deriving (Show, Generic, Eq, Deserializable)
 
-newtype ApiKey = ApiKey Int16 deriving (Show, Eq, Deserializable, Serializable, Num, Integral, Ord, Real, Enum) -- numeric ID for API (i.e. metadata req, produce req, etc.)
-newtype ApiVersion = ApiVersion Int16 deriving (Show, Eq, Deserializable, Serializable, Num, Integral, Ord, Real, Enum)
-newtype CorrelationId = CorrelationId Int32 deriving (Show, Eq, Deserializable, Serializable, Num, Integral, Ord, Real, Enum)
-newtype ClientId = ClientId KafkaString deriving (Show, Eq, Deserializable, Serializable, IsString)
+newtype ApiKey = ApiKey Int16 deriving (Show, Eq, Deserializable, Serializable, Num, Integral, Ord, Real, Generic, Enum) -- numeric ID for API (i.e. metadata req, produce req, etc.)
+newtype ApiVersion = ApiVersion Int16 deriving (Show, Eq, Deserializable, Serializable, Num, Integral, Ord, Real, Generic, Enum)
+newtype CorrelationId = CorrelationId Int32 deriving (Show, Eq, Deserializable, Serializable, Num, Integral, Ord, Real, Generic, Enum)
+newtype ClientId = ClientId KafkaString deriving (Show, Eq, Deserializable, Serializable, Generic, IsString)
 
 data RequestMessage = MetadataRequest MetadataRequest
                     | ProduceRequest ProduceRequest
@@ -73,94 +85,112 @@ data RequestMessage = MetadataRequest MetadataRequest
                     | OffsetRequest OffsetRequest
                     | OffsetCommitRequest OffsetCommitRequest
                     | OffsetFetchRequest OffsetFetchRequest
+                    | HeartbeatRequest HeartbeatRequest
                     | GroupCoordinatorRequest GroupCoordinatorRequest
-                    deriving (Show, Eq)
+                    | CreateTopicsRequest CreateTopicsRequest
+                    | DeleteTopicsRequest DeleteTopicsRequest
+                    deriving (Show, Generic, Eq)
 
-newtype MetadataRequest = MetadataReq [TopicName] deriving (Show, Eq, Serializable, Deserializable)
-newtype TopicName = TName { _tName :: KafkaString } deriving (Eq, Ord, Deserializable, Serializable, IsString)
+newtype MetadataRequest = MetadataReq [TopicName] deriving (Show, Eq, Serializable, Generic, Deserializable)
+newtype TopicName = TName { _tName :: KafkaString } deriving (Eq, Ord, Deserializable, Serializable, Generic, IsString)
 
 instance Show TopicName where
   show = show . B.unpack . _kString. _tName
 
-newtype KafkaBytes = KBytes { _kafkaByteString :: ByteString } deriving (Show, Eq, IsString)
-newtype KafkaString = KString { _kString :: ByteString } deriving (Show, Eq, Ord, IsString)
+newtype KafkaBytes = KBytes { _kafkaByteString :: ByteString } deriving (Show, Eq, Generic, IsString)
+newtype KafkaString = KString { _kString :: ByteString } deriving (Show, Eq, Ord, Generic, IsString)
 
 newtype ProduceResponse =
   ProduceResp { _produceResponseFields :: [(TopicName, [(Partition, KafkaError, Offset)])] }
-  deriving (Show, Eq, Deserializable, Serializable)
+  deriving (Show, Eq, Deserializable, Serializable, Generic)
 
 newtype OffsetResponse =
   OffsetResp { _offsetResponseFields :: [(TopicName, [PartitionOffsets])] }
-  deriving (Show, Eq, Deserializable)
+  deriving (Show, Eq, Deserializable, Generic)
 
 newtype PartitionOffsets =
   PartitionOffsets { _partitionOffsetsFields :: (Partition, KafkaError, [Offset]) }
-  deriving (Show, Eq, Deserializable)
+  deriving (Show, Eq, Deserializable, Generic)
 
 newtype FetchResponse =
   FetchResp { _fetchResponseFields :: [(TopicName, [(Partition, KafkaError, Offset, MessageSet)])] }
-  deriving (Show, Eq, Serializable, Deserializable)
+  deriving (Show, Eq, Serializable, Deserializable, Generic)
 
-newtype MetadataResponse = MetadataResp { _metadataResponseFields :: ([Broker], [TopicMetadata]) } deriving (Show, Eq, Deserializable)
-newtype Broker = Broker { _brokerFields :: (NodeId, Host, Port) } deriving (Show, Eq, Ord, Deserializable)
-newtype NodeId = NodeId { _nodeId :: Int32 } deriving (Show, Eq, Deserializable, Num, Integral, Ord, Real, Enum)
-newtype Host = Host { _hostKString :: KafkaString } deriving (Show, Eq, Ord, Deserializable, IsString)
-newtype Port = Port { _portInt :: Int32 } deriving (Show, Eq, Deserializable, Num, Integral, Ord, Real, Enum)
-newtype TopicMetadata = TopicMetadata { _topicMetadataFields :: (KafkaError, TopicName, [PartitionMetadata]) } deriving (Show, Eq, Deserializable)
-newtype PartitionMetadata = PartitionMetadata { _partitionMetadataFields :: (KafkaError, Partition, Leader, Replicas, Isr) } deriving (Show, Eq, Deserializable)
-newtype Leader = Leader { _leaderId :: Maybe Int32 } deriving (Show, Eq, Ord)
+newtype CreateTopicsResponse =
+  TopicsResp { _topicsResponseFields :: [(TopicName, KafkaError)] }
+  deriving (Show, Eq, Deserializable, Serializable, Generic)
 
-newtype Replicas = Replicas [Int32] deriving (Show, Eq, Serializable, Deserializable)
-newtype Isr = Isr [Int32] deriving (Show, Eq, Deserializable)
+newtype DeleteTopicsResponse =
+  DeleteTopicsResp { _deleteTopicsResponseFields :: [(TopicName, KafkaError)] }
+  deriving (Show, Eq, Deserializable, Serializable, Generic)
 
-newtype OffsetCommitResponse = OffsetCommitResp [(TopicName, [(Partition, KafkaError)])] deriving (Show, Eq, Deserializable)
-newtype OffsetFetchResponse = OffsetFetchResp [(TopicName, [(Partition, Offset, Metadata, KafkaError)])] deriving (Show, Eq, Deserializable)
+newtype HeartbeatResponse =
+  HeartbeatResp { _heartbeatResponseFields :: KafkaError }
+  deriving (Show, Eq, Deserializable, Serializable, Generic)
 
-newtype OffsetRequest = OffsetReq (ReplicaId, [(TopicName, [(Partition, Time, MaxNumberOfOffsets)])]) deriving (Show, Eq, Serializable)
-newtype Time = Time { _timeInt :: Int64 } deriving (Show, Eq, Serializable, Num, Integral, Ord, Real, Enum, Bounded)
-newtype MaxNumberOfOffsets = MaxNumberOfOffsets Int32 deriving (Show, Eq, Serializable, Num, Integral, Ord, Real, Enum)
+
+newtype MetadataResponse = MetadataResp { _metadataResponseFields :: ([Broker], [TopicMetadata]) } deriving (Show, Eq, Deserializable, Generic)
+newtype Broker = Broker { _brokerFields :: (NodeId, Host, Port) } deriving (Show, Eq, Ord, Deserializable, Generic)
+newtype NodeId = NodeId { _nodeId :: Int32 } deriving (Show, Eq, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
+newtype Host = Host { _hostKString :: KafkaString } deriving (Show, Eq, Ord, Deserializable, IsString, Generic)
+newtype Port = Port { _portInt :: Int32 } deriving (Show, Eq, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
+newtype TopicMetadata = TopicMetadata { _topicMetadataFields :: (KafkaError, TopicName, [PartitionMetadata]) } deriving (Show, Eq, Deserializable, Generic)
+newtype PartitionMetadata = PartitionMetadata { _partitionMetadataFields :: (KafkaError, Partition, Leader, Replicas, Isr) } deriving (Show, Eq, Deserializable, Generic)
+newtype Leader = Leader { _leaderId :: Maybe Int32 } deriving (Show, Eq, Ord, Generic)
+
+newtype Replicas = Replicas [Int32] deriving (Show, Eq, Serializable, Deserializable, Generic)
+newtype Isr = Isr [Int32] deriving (Show, Eq, Deserializable, Generic)
+
+newtype OffsetCommitResponse = OffsetCommitResp [(TopicName, [(Partition, KafkaError)])] deriving (Show, Eq, Deserializable, Generic)
+newtype OffsetFetchResponse = OffsetFetchResp [(TopicName, [(Partition, Offset, Metadata, KafkaError)])] deriving (Show, Eq, Deserializable, Generic)
+
+newtype OffsetRequest = OffsetReq (ReplicaId, [(TopicName, [(Partition, Time, MaxNumberOfOffsets)])]) deriving (Show, Eq, Serializable, Generic)
+newtype Time = Time { _timeInt :: Int64 } deriving (Show, Eq, Serializable, Num, Integral, Ord, Real, Enum, Bounded, Generic)
+newtype MaxNumberOfOffsets = MaxNumberOfOffsets Int32 deriving (Show, Eq, Serializable, Num, Integral, Ord, Real, Enum, Generic)
 
 newtype FetchRequest =
   FetchReq (ReplicaId, MaxWaitTime, MinBytes,
             [(TopicName, [(Partition, Offset, MaxBytes)])])
-  deriving (Show, Eq, Deserializable, Serializable)
+  deriving (Show, Eq, Deserializable, Serializable, Generic)
 
-newtype ReplicaId = ReplicaId Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable)
-newtype MaxWaitTime = MaxWaitTime Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable)
-newtype MinBytes = MinBytes Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable)
-newtype MaxBytes = MaxBytes Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable)
+newtype ReplicaId = ReplicaId Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable, Generic)
+newtype MaxWaitTime = MaxWaitTime Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable, Generic)
+newtype MinBytes = MinBytes Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable, Generic)
+newtype MaxBytes = MaxBytes Int32 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable, Generic)
 
 newtype ProduceRequest =
   ProduceReq (RequiredAcks, Timeout,
               [(TopicName, [(Partition, MessageSet)])])
-  deriving (Show, Eq, Serializable)
+  deriving (Show, Eq, Serializable, Generic)
 
 newtype RequiredAcks =
-  RequiredAcks Int16 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
+  RequiredAcks Int16 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
 newtype Timeout =
-  Timeout Int32 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
+  Timeout Int32 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
 newtype Partition =
-  Partition Int32 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
+  Partition Int32 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
 
-newtype MessageSet =
-  MessageSet { _messageSetMembers :: [MessageSetMember] } deriving (Show, Eq)
+data MessageSet = MessageSet { _codec :: CompressionCodec, _messageSetMembers :: [MessageSetMember] }
+  deriving (Show, Eq, Generic)
 data MessageSetMember =
-  MessageSetMember { _setOffset :: Offset, _setMessage :: Message } deriving (Show, Eq)
+  MessageSetMember { _setOffset :: Offset, _setMessage :: Message } deriving (Show, Eq, Generic)
 
-newtype Offset = Offset Int64 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
+newtype Offset = Offset Int64 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
 
 newtype Message =
   Message { _messageFields :: (Crc, MagicByte, Attributes, Maybe Timestamp, Key, Value) }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-newtype Crc = Crc Int32 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
-newtype MagicByte = MagicByte Int8 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
-newtype Attributes = Attributes Int8 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
+data CompressionCodec = NoCompression | Gzip deriving (Show, Eq, Generic)
 
-newtype Timestamp = Timestamp Int64 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum)
+newtype Crc = Crc Int32 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
+newtype MagicByte = MagicByte Int8 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
+data Attributes = Attributes { _compressionCodec :: CompressionCodec } deriving (Show, Eq, Generic)
 
-newtype Key = Key { _keyBytes :: Maybe KafkaBytes } deriving (Show, Eq)
-newtype Value = Value { _valueBytes :: Maybe KafkaBytes } deriving (Show, Eq)
+newtype Timestamp = Timestamp Int64 deriving (Show, Eq, Serializable, Deserializable, Num, Integral, Ord, Real, Enum, Generic)
+
+newtype Key = Key { _keyBytes :: Maybe KafkaBytes } deriving (Show, Eq, Generic)
+newtype Value = Value { _valueBytes :: Maybe KafkaBytes } deriving (Show, Eq, Generic)
 
 data ResponseMessage = MetadataResponse MetadataResponse
                      | ProduceResponse ProduceResponse
@@ -168,15 +198,32 @@ data ResponseMessage = MetadataResponse MetadataResponse
                      | OffsetResponse OffsetResponse
                      | OffsetCommitResponse OffsetCommitResponse
                      | OffsetFetchResponse OffsetFetchResponse
+                     | HeartbeatResponse HeartbeatResponse
                      | GroupCoordinatorResponse GroupCoordinatorResponse
-                     deriving (Show, Eq)
+                     | CreateTopicsResponse CreateTopicsResponse
+                     | DeleteTopicsResponse DeleteTopicsResponse
+                     deriving (Show, Eq, Generic)
 
-newtype GroupCoordinatorRequest = GroupCoordinatorReq ConsumerGroup deriving (Show, Eq, Serializable)
 
-newtype OffsetCommitRequest = OffsetCommitReq (ConsumerGroup, [(TopicName, [(Partition, Offset, Time, Metadata)])]) deriving (Show, Eq, Serializable)
-newtype OffsetFetchRequest = OffsetFetchReq (ConsumerGroup, [(TopicName, [Partition])]) deriving (Show, Eq, Serializable)
-newtype ConsumerGroup = ConsumerGroup KafkaString deriving (Show, Eq, Serializable, Deserializable, IsString)
-newtype Metadata = Metadata KafkaString deriving (Show, Eq, Serializable, Deserializable, IsString)
+newtype GroupId = GroupId { _groupId :: KafkaString } deriving (Show, Eq, Serializable, Generic, IsString)
+
+newtype GenerationId = GenerationId { _genrationId :: Int32 } deriving (Show, Eq, Enum, Num, Ord, Real, Integral, Generic, Serializable)
+
+newtype MemberId = MemberId { _membderId :: KafkaString } deriving (Show, Eq, Generic, Serializable, IsString)
+
+
+newtype HeartbeatRequest = HeartbeatReq (GroupId, GenerationId, MemberId) deriving (Show, Eq, Serializable, Generic)
+
+newtype ReplicationFactor = ReplicationFactor Int16 deriving (Show, Eq, Num, Integral, Ord, Real, Enum, Serializable, Deserializable, Generic)
+
+newtype GroupCoordinatorRequest = GroupCoordinatorReq ConsumerGroup deriving (Show, Eq, Serializable, Generic)
+newtype CreateTopicsRequest = CreateTopicsReq ([(TopicName, Partition, ReplicationFactor, [(Partition, Replicas)], [(KafkaString, Metadata)])], Timeout) deriving (Show, Eq, Serializable, Generic)
+newtype DeleteTopicsRequest = DeleteTopicsReq ([TopicName], Timeout) deriving (Show, Eq, Serializable, Generic)
+
+newtype OffsetCommitRequest = OffsetCommitReq (ConsumerGroup, [(TopicName, [(Partition, Offset, Time, Metadata)])]) deriving (Show, Eq, Serializable, Generic)
+newtype OffsetFetchRequest = OffsetFetchReq (ConsumerGroup, [(TopicName, [Partition])]) deriving (Show, Eq, Serializable, Generic)
+newtype ConsumerGroup = ConsumerGroup KafkaString deriving (Show, Eq, Serializable, Deserializable, IsString, Generic)
+newtype Metadata = Metadata KafkaString deriving (Show, Eq, Serializable, Deserializable, IsString, Generic)
 
 errorKafka :: KafkaError -> Int16
 errorKafka NoError                             = 0
@@ -193,28 +240,163 @@ errorKafka ReplicaNotAvailable                 = 9
 errorKafka MessageSizeTooLarge                 = 10
 errorKafka StaleControllerEpochCode            = 11
 errorKafka OffsetMetadataTooLargeCode          = 12
+errorKafka NetworkException                    = 13
 errorKafka OffsetsLoadInProgressCode           = 14
 errorKafka ConsumerCoordinatorNotAvailableCode = 15
 errorKafka NotCoordinatorForConsumerCode       = 16
+errorKafka InvalidTopicException               = 17
+errorKafka RecordListTooLarge                  = 18
+errorKafka NotEnoughReplicas                   = 19
+errorKafka NotEnoughReplicasAfterAppend        = 20
+errorKafka InvalidRequiredAcks                 = 21
+errorKafka IllegalGeneration                   = 22
+errorKafka InconsistentGroupProtocol           = 23
+errorKafka InvalidGroupId                      = 24
+errorKafka UnknownMemberId                     = 25
+errorKafka InvalidSessionTimeout               = 26
+errorKafka RebalanceInProgress                 = 27
+errorKafka InvalidCommitOffsetSize             = 28
+errorKafka TopicAuthorizationFailed            = 29
+errorKafka GroupAuthorizationFailed            = 30
+errorKafka ClusterAuthorizationFailed          = 31
+errorKafka InvalidTimestamp                    = 32
+errorKafka UnsupportedSASLMechanism            = 33
+errorKafka IllegalSASLState                    = 34
+errorKafka UnsupportedVersion                  = 35
+errorKafka TopicAlreadyExists                  = 36
+errorKafka InvalidPartitions                   = 37
+errorKafka InvalidReplicationFactor            = 38
+errorKafka InvalidReplicaAssignment            = 39
+errorKafka InvalidConfig                       = 40
+errorKafka NotController                       = 41
+errorKafka InvalidRequest                      = 42
+errorKafka UnsupportedForMessageFormat         = 43
+errorKafka PolicyViolation                     = 44
+errorKafka OutOfOrderSequenceNumber            = 45
+errorKafka DuplicateSequenceNumber             = 46
+errorKafka InvalidProducerEpoch                = 47
+errorKafka InvalidTxnState                     = 48
+errorKafka InvalidProducerIdMapping            = 49
+errorKafka InvalidTransactionTimeout           = 50
+errorKafka ConcurrentTransactions              = 51
+errorKafka TransactionCoordinatorFenced        = 52
+errorKafka TransactionalIdAuthorizationFailed  = 53
+errorKafka SecurityDisabled                    = 54
+errorKafka OperationNotAttempted               = 55
+errorKafka KafkaStorageError                   = 56
+errorKafka LogDirNotFound                      = 57
+errorKafka SASLAuthenticationFailed            = 58
+errorKafka UnknownProducerId                   = 59
+errorKafka ReassignmentInProgress              = 60
+errorKafka DelegationTokenAuthDisabled         = 61
+errorKafka DelegationTokenNotFound             = 62
+errorKafka DelegationTokenOwnerMismatch        = 63
+errorKafka DelegationTokenRequestNotAllowed    = 64
+errorKafka DelegationTokenAuthorizationFailed  = 65
+errorKafka DelegationTokenExpired              = 66
+errorKafka InvalidPrincipalType                = 67
+errorKafka NonEmptyGroup                       = 68
+errorKafka GroupIdNotFound                     = 69
+errorKafka FetchSessionIdNotFound              = 70
+errorKafka InvalidFetchSessionEpoch            = 71
+errorKafka ListenerNotFound                    = 72
+errorKafka TopicDeletionDisabled               = 73
+errorKafka FencedLeaderEpoch                   = 74
+errorKafka UnknownLeaderEpoch                  = 75
+errorKafka UnsupportedCompressionType          = 76
+errorKafka StaleBrokerEpoch                    = 77
+errorKafka OffsetNotAvailable                  = 78
+errorKafka MemberIdRequired                    = 79
+errorKafka PreferredLeaderNotAvailable         = 80
+errorKafka GroupMaxSizeReached                 = 81
+errorKafka FencedInstanceId                    = 82
+
 
 data KafkaError = NoError -- ^ @0@ No error--it worked!
-                | Unknown -- ^ @-1@ An unexpected server error
-                | OffsetOutOfRange -- ^ @1@ The requested offset is outside the range of offsets maintained by the server for the given topic/partition.
-                | InvalidMessage -- ^ @2@ This indicates that a message contents does not match its CRC
-                | UnknownTopicOrPartition -- ^ @3@ This request is for a topic or partition that does not exist on this broker.
-                | InvalidMessageSize -- ^ @4@ The message has a negative size
-                | LeaderNotAvailable -- ^ @5@ This error is thrown if we are in the middle of a leadership election and there is currently no leader for this partition and hence it is unavailable for writes.
-                | NotLeaderForPartition -- ^ @6@ This error is thrown if the client attempts to send messages to a replica that is not the leader for some partition. It indicates that the clients metadata is out of date.
-                | RequestTimedOut -- ^ @7@ This error is thrown if the request exceeds the user-specified time limit in the request.
-                | BrokerNotAvailable -- ^ @8@ This is not a client facing error and is used mostly by tools when a broker is not alive.
-                | ReplicaNotAvailable -- ^ @9@ If replica is expected on a broker, but is not.
-                | MessageSizeTooLarge -- ^ @10@ The server has a configurable maximum message size to avoid unbounded memory allocation. This error is thrown if the client attempt to produce a message larger than this maximum.
-                | StaleControllerEpochCode -- ^ @11@ Internal error code for broker-to-broker communication.
-                | OffsetMetadataTooLargeCode -- ^ @12@ If you specify a string larger than configured maximum for offset metadata
-                | OffsetsLoadInProgressCode -- ^ @14@ The broker returns this error code for an offset fetch request if it is still loading offsets (after a leader change for that offsets topic partition).
-                | ConsumerCoordinatorNotAvailableCode -- ^ @15@ The broker returns this error code for consumer metadata requests or offset commit requests if the offsets topic has not yet been created.
-                | NotCoordinatorForConsumerCode -- ^ @16@ The broker returns this error code if it receives an offset fetch or commit request for a consumer group that it is not a coordinator for.
-                deriving (Eq, Show)
+                | Unknown -- ^ @-1@ The server experienced an unexpected error when processing the request. (Retriable: false).
+                | OffsetOutOfRange -- ^ @1@ The requested offset is not within the range of offsets maintained by the server. (Retriable: false)
+                | InvalidMessage -- ^ @2@ This message has failed its CRC checksum, exceeds the valid size, has a null key for a compacted topic, or is otherwise corrupt. (Retriable: true)
+                | UnknownTopicOrPartition -- ^ @3@ This server does not host this topic-partition. (Retriable: true)
+                | InvalidMessageSize -- ^ @4@ The requested fetch size is invalid. (Retriable: false)
+                | LeaderNotAvailable -- ^ @5@ There is no leader for this topic-partition as we are in the middle of a leadership election. (Retriable: true)
+                | NotLeaderForPartition -- ^ @6@ This server is not the leader for that topic-partition. (Retriable: true)
+                | RequestTimedOut -- ^ @7@ The request timed out. (Retriable: true)
+                | BrokerNotAvailable -- ^ @8@ The broker is not available. (Retriable: false)
+                | ReplicaNotAvailable -- ^ @9@ The replica is not available for the requested topic-partition. (Retriable: false)
+                | MessageSizeTooLarge -- ^ @10@ The request included a message larger than the max message size the server will accept. (Retriable: false)
+                | StaleControllerEpochCode -- ^ @11@ The controller moved to another broker. (Retriable: false)
+                | OffsetMetadataTooLargeCode -- ^ @12@ The metadata field of the offset request was too large. (Retriable: false)
+                | NetworkException -- ^ @13@ The server disconnected before a response was received. (Retriable: true)
+                | OffsetsLoadInProgressCode -- ^ @14@ The coordinator is loading and hence can't process requests. (Retriable: true)
+                | ConsumerCoordinatorNotAvailableCode -- ^ @15@ The broker returns this error code for consumer metadata requests or offset commit requests if the offsets topic has not yet been created. (Retriable: true)
+                | NotCoordinatorForConsumerCode -- ^ @16@ The broker returns this error code if it receives an offset fetch or commit request for a consumer group that it is not a coordinator for. (Retriable: true)
+                | InvalidTopicException -- ^ @17@ The request attempted to perform an operation on an invalid topic. (Retriable: false)
+                | RecordListTooLarge -- ^ @18@ The request included message batch larger than the configured segment size on the server. (Retriable: false)
+                | NotEnoughReplicas -- ^ @19@ Messages are rejected since there are fewer in-sync replicas than required. (Retriable: true)
+                | NotEnoughReplicasAfterAppend -- ^ @20@ Messages are written to the log, but to fewer in-sync replicas than required. (Retriable: true)
+                | InvalidRequiredAcks -- ^ @21@ Produce request specified an invalid value for required acks. (Retriable: false)
+                | IllegalGeneration -- ^ @22@ Specified group generation id is not valid. (Retriable: false)
+                | InconsistentGroupProtocol -- ^ @23@ The group member's supported protocols are incompatible with those of existing members or first group member tried to join with empty protocol type or empty protocol list. (Retriable: false)
+                | InvalidGroupId -- ^ @24@ -- The configured groupId is invalid. (Retriable: false)
+                | UnknownMemberId -- ^ @25@ The coordinator is not aware of this member. (Retriable: false)
+                | InvalidSessionTimeout -- ^ @26@ The session timeout is not within the range allowed by the broker (as configured by group.min.session.timeout.ms and group.max.session.timeout.ms). (Retriable: false)
+                | RebalanceInProgress -- ^ @27@ The group is rebalancing, so a rejoin is needed. (Retriable: false)
+                | InvalidCommitOffsetSize -- ^ @28@ The committing offset data size is not valid. (Retriable: false)
+                | TopicAuthorizationFailed -- ^ @29@ Topic authorization failed. (Retriable: false)
+                | GroupAuthorizationFailed -- ^ @30@ Group authorization failed. (Retriable: false)
+                | ClusterAuthorizationFailed -- ^ @31@ Cluster authorization failed. (Retriable: false)
+                | InvalidTimestamp -- ^ @32@ The timestamp of the message is out of acceptable range. (Retriable: false)
+                | UnsupportedSASLMechanism -- ^ @33@ The broker does not support the requested SASL mechanism. (Retriable: false)
+                | IllegalSASLState -- ^ @34@ Request is not valid given the current SASL state. (Retriable: false)
+                | UnsupportedVersion -- ^ @35@ The version of API is not supported. (Retriable: false)
+                | TopicAlreadyExists -- ^ @36@ Topic with this name already exists. (Retriable: false)
+                | InvalidPartitions -- ^ @37@ Number of partitions is below 1. (Retriable: false)
+                | InvalidReplicationFactor -- ^ @38@ Replication factor is below 1 or larger than the number of available brokers. (Retriable: false)
+                | InvalidReplicaAssignment -- ^ @39@ Replica assignment is invalid. (Retriable: false)
+                | InvalidConfig -- ^ @40@ Configuration is invalid. (Retriable: false)
+                | NotController -- ^ @41@ This is not the correct controller for this cluster. (Retriable: true)
+                | InvalidRequest -- ^ @42@ This most likely occurs because of a request being malformed by the client library or the message was sent to an incompatible broker. See the broker logs for more details. (Retriable: false)
+                | UnsupportedForMessageFormat -- ^ @43@ The message format version on the broker does not support the request. (Retriable: false)
+                | PolicyViolation -- ^ @44@ Request parameters do not satisfy the configured policy. (Retriable: false)
+                | OutOfOrderSequenceNumber -- ^ @45@ The broker received an out of order sequence number. (Retriable: false)
+                | DuplicateSequenceNumber -- ^ @46@ The broker received a duplicate sequence number. (Retriable: false)
+                | InvalidProducerEpoch -- ^ @47@ Producer attempted an operation with an old epoch. Either there is a newer producer with the same transactionalId, or the producer's transaction has been expired by the broker. (Retriable: false)
+                | InvalidTxnState -- ^ @48@ The producer attempted a transactional operation in an invalid state. (Retriable: false)
+                | InvalidProducerIdMapping -- ^ @49@ The producer attempted to use a producer id which is not currently assigned to its transactional id. (Retriable: false)
+                | InvalidTransactionTimeout -- ^ @50@ The transaction timeout is larger than the maximum value allowed by the broker (as configured by transaction.max.timeout.ms). (Retriable: false)
+                | ConcurrentTransactions -- ^ @51@ The producer attempted to update a transaction while another concurrent operation on the same transaction was ongoing. (Retriable: false)
+                | TransactionCoordinatorFenced -- ^ @52@ Indicates that the transaction coordinator sending a WriteTxnMarker is no longer the current coordinator for a given producer. (Retriable: false)
+                | TransactionalIdAuthorizationFailed -- ^ @53@ Transactional Id authorization failed. (Retriable: false)
+                | SecurityDisabled -- ^ @54@ Security features are disabled. (Retriable: false)
+                | OperationNotAttempted -- ^ @55@ The broker did not attempt to execute this operation. This may happen for batched RPCs where some operations in the batch failed, causing the broker to respond without trying the rest. (Retriable: false)
+                | KafkaStorageError -- ^ @56@ Disk error when trying to access log file on the disk. (Retriable: true)
+                | LogDirNotFound -- ^ @57@ The user-specified log directory is not found in the broker config. (Retriable: false)
+                | SASLAuthenticationFailed -- ^ @58@ SASL Authentication failed. (Retriable: false)
+                | UnknownProducerId -- ^ @59@ This exception is raised by the broker if it could not locate the producer metadata associated with the producerId in question. This could happen if, for instance, the producer's records were deleted because their retention time had elapsed. Once the last records of the producerId are removed, the producer's metadata is removed from the broker, and future appends by the producer will return this exception. (Retriable: false)
+                | ReassignmentInProgress -- ^ @60@ A partition reassignment is in progress. (Retriable: false)
+                | DelegationTokenAuthDisabled -- ^ @61@ Delegation Token feature is not enabled. (Retriable: false)
+                | DelegationTokenNotFound -- ^ @62@ Delegation Token is not found on server. (Retriable: false)
+                | DelegationTokenOwnerMismatch -- ^ @63@ Specified Principal is not valid Owner/Renewer. (Retriable: false)
+                | DelegationTokenRequestNotAllowed -- ^ @64@ Delegation Token requests are not allowed on PLAINTEXT/1-way SSL channels and on delegation token authenticated channels. (Retriable: xxx)
+                | DelegationTokenAuthorizationFailed -- ^ @65@ Delegation Token authorization failed. (Retriable: false)
+                | DelegationTokenExpired -- ^ @66@ Delegation Token is expired. (Retriable: false)
+                | InvalidPrincipalType -- ^ @67@ Supplied principalType is not supported. (Retriable: false)
+                | NonEmptyGroup -- ^ @68@ The group is not empty. (Retriable: false)
+                | GroupIdNotFound -- ^ @69@ The group id does not exist. (Retriable: false)
+                | FetchSessionIdNotFound -- ^ @70@ The fetch session ID was not found. (Retriable: true)
+                | InvalidFetchSessionEpoch -- ^ @71@ The fetch session epoch is invalid. (Retriable: true)
+                | ListenerNotFound -- ^ @72@ There is no listener on the leader broker that matches the listener on which metadata request was processed. (Retriable: true)
+                | TopicDeletionDisabled -- ^ @73@ Topic deletion is disabled. (Retriable: false)
+                | FencedLeaderEpoch -- ^ @74@ The leader epoch in the request is older than the epoch on the broker (Retriable: true)
+                | UnknownLeaderEpoch -- ^ @75@ The leader epoch in the request is newer than the epoch on the broker (Retriable: true)
+                | UnsupportedCompressionType -- ^ @76@ The requesting client does not support the compression type of given partition. (Retriable: false)
+                | StaleBrokerEpoch -- ^ @77@ Broker epoch has changed (Retriable: false)
+                | OffsetNotAvailable -- ^ @78@ The leader high watermark has not caught up from a recent leader election so the offsets cannot be guaranteed to be monotonically increasing (Retriable: xxx)
+                | MemberIdRequired -- ^ @79@ The group member needs to have a valid member id before actually entering a consumer group (Retriable: xxx)
+                | PreferredLeaderNotAvailable -- ^ @80@ The preferred leader was not available (Retriable: xxx)
+                | GroupMaxSizeReached -- ^ @81@ The consumer group has reached its max size., GroupMaxSizeReachedException::new) (Retriable: xxx)
+                | FencedInstanceId -- ^ @82@ The broker rejected this static consumer since another consumer with the same group.instance.id has registered with a different member.id. (Retriable: xxx)
+                deriving (Bounded, Enum, Eq, Generic, Show)
 
 instance Serializable KafkaError where
   serialize = serialize . errorKafka
@@ -237,14 +419,81 @@ instance Deserializable KafkaError where
       10   -> return MessageSizeTooLarge
       11   -> return StaleControllerEpochCode
       12   -> return OffsetMetadataTooLargeCode
+      13   -> return NetworkException
       14   -> return OffsetsLoadInProgressCode
       15   -> return ConsumerCoordinatorNotAvailableCode
       16   -> return NotCoordinatorForConsumerCode
+      17   -> return InvalidTopicException
+      18   -> return RecordListTooLarge
+      19   -> return NotEnoughReplicas
+      20   -> return NotEnoughReplicasAfterAppend
+      21   -> return InvalidRequiredAcks
+      22   -> return IllegalGeneration
+      23   -> return InconsistentGroupProtocol
+      24   -> return InvalidGroupId
+      25   -> return UnknownMemberId
+      26   -> return InvalidSessionTimeout
+      27   -> return RebalanceInProgress
+      28   -> return InvalidCommitOffsetSize
+      29   -> return TopicAuthorizationFailed
+      30   -> return GroupAuthorizationFailed
+      31   -> return ClusterAuthorizationFailed
+      32   -> return InvalidTimestamp
+      33   -> return UnsupportedSASLMechanism
+      34   -> return IllegalSASLState
+      35   -> return UnsupportedVersion
+      36   -> return TopicAlreadyExists
+      37   -> return InvalidPartitions
+      38   -> return InvalidReplicationFactor
+      39   -> return InvalidReplicaAssignment
+      40   -> return InvalidConfig
+      41   -> return NotController
+      42   -> return InvalidRequest
+      43   -> return UnsupportedForMessageFormat
+      44   -> return PolicyViolation
+      45   -> return OutOfOrderSequenceNumber
+      46   -> return DuplicateSequenceNumber
+      47   -> return InvalidProducerEpoch
+      48   -> return InvalidTxnState
+      49   -> return InvalidProducerIdMapping
+      50   -> return InvalidTransactionTimeout
+      51   -> return ConcurrentTransactions
+      52   -> return TransactionCoordinatorFenced
+      53   -> return TransactionalIdAuthorizationFailed
+      54   -> return SecurityDisabled
+      55   -> return OperationNotAttempted
+      56   -> return KafkaStorageError
+      57   -> return LogDirNotFound
+      58   -> return SASLAuthenticationFailed
+      59   -> return UnknownProducerId
+      60   -> return ReassignmentInProgress
+      61   -> return DelegationTokenAuthDisabled
+      62   -> return DelegationTokenNotFound
+      63   -> return DelegationTokenOwnerMismatch
+      64   -> return DelegationTokenRequestNotAllowed
+      65   -> return DelegationTokenAuthorizationFailed
+      66   -> return DelegationTokenExpired
+      67   -> return InvalidPrincipalType
+      68   -> return NonEmptyGroup
+      69   -> return GroupIdNotFound
+      70   -> return FetchSessionIdNotFound
+      71   -> return InvalidFetchSessionEpoch
+      72   -> return ListenerNotFound
+      73   -> return TopicDeletionDisabled
+      74   -> return FencedLeaderEpoch
+      75   -> return UnknownLeaderEpoch
+      76   -> return UnsupportedCompressionType
+      77   -> return StaleBrokerEpoch
+      78   -> return OffsetNotAvailable
+      79   -> return MemberIdRequired
+      80   -> return PreferredLeaderNotAvailable
+      81   -> return GroupMaxSizeReached
+      82   -> return FencedInstanceId
       _    -> fail $ "invalid error code: " ++ show x
 
 instance Exception KafkaError
 
-newtype Request = Request (CorrelationId, ClientId, RequestMessage) deriving (Show, Eq)
+newtype Request = Request (CorrelationId, ClientId, RequestMessage) deriving (Show, Eq, Generic)
 
 instance Serializable Request where
   serialize (Request (correlationId, clientId, r)) = do
@@ -271,6 +520,9 @@ apiKey MetadataRequest{} = ApiKey 3
 apiKey OffsetCommitRequest{} = ApiKey 8
 apiKey OffsetFetchRequest{} = ApiKey 9
 apiKey GroupCoordinatorRequest{} = ApiKey 10
+apiKey HeartbeatRequest{} = ApiKey 12
+apiKey CreateTopicsRequest{} = ApiKey 19
+apiKey DeleteTopicsRequest{} = ApiKey 20
 
 instance Serializable RequestMessage where
   serialize (ProduceRequest r) = serialize r
@@ -280,6 +532,9 @@ instance Serializable RequestMessage where
   serialize (OffsetCommitRequest r) = serialize r
   serialize (OffsetFetchRequest r) = serialize r
   serialize (GroupCoordinatorRequest r) = serialize r
+  serialize (CreateTopicsRequest r) = serialize r
+  serialize (DeleteTopicsRequest r) = serialize r
+  serialize (HeartbeatRequest r) = serialize r
 
 instance Serializable Int64 where serialize = putWord64be . fromIntegral
 instance Serializable Int32 where serialize = putWord32be . fromIntegral
@@ -301,11 +556,35 @@ instance Serializable KafkaString where
     putByteString bs
 
 instance Serializable MessageSet where
-  serialize (MessageSet ms) = do
-    let bytes = runPut $ mapM_ serialize ms
+  serialize (MessageSet codec messageSet) = do
+    let bytes = runPut $ mapM_ serialize (compress codec messageSet)
         l = fromIntegral (B.length bytes) :: Int32
     serialize l
     putByteString bytes
+
+    where compress :: CompressionCodec -> [MessageSetMember] -> [MessageSetMember]
+          compress NoCompression ms = ms
+          compress c ms = [MessageSetMember (Offset (-1)) (message c ms)]
+
+          message :: CompressionCodec -> [MessageSetMember] -> Message
+          message c ms = Message (0, 0, Attributes c, Nothing, Key Nothing, value (compressor c) ms)
+
+          compressor :: CompressionCodec -> (ByteString -> ByteString)
+          compressor c = case c of
+            Gzip -> LB.toStrict . GZip.compress . LB.fromStrict
+            _ -> error "Unsupported compression codec"
+
+          value :: (ByteString -> ByteString) -> [MessageSetMember] -> Value
+          value c ms = Value . Just . KBytes $ c (runPut $ mapM_ serialize ms)
+
+instance Serializable Attributes where
+  serialize = serialize . bits
+    where bits :: Attributes -> Int8
+          bits = codecValue . _compressionCodec
+
+          codecValue :: CompressionCodec -> Int8
+          codecValue NoCompression = 0
+          codecValue Gzip = 1
 
 instance Serializable KafkaBytes where
   serialize (KBytes bs) = do
@@ -363,13 +642,50 @@ instance Deserializable MessageSet where
   deserialize = do
     l <- deserialize :: Get Int32
     ms <- isolate (fromIntegral l) getMembers
-    return $ MessageSet ms
+
+    decompressed <- mapM decompress ms
+
+    return $ MessageSet NoCompression (concat decompressed)
+
       where getMembers :: Get [MessageSetMember]
             getMembers = do
               wasEmpty <- isEmpty
               if wasEmpty
               then return []
               else liftM2 (:) deserialize getMembers <|> (remaining >>= getBytes >> return [])
+
+            decompress :: MessageSetMember -> Get [MessageSetMember]
+            decompress m = if isCompressed m
+                  then decompressSetMember m
+                  else return [m]
+
+            isCompressed :: MessageSetMember -> Bool
+            isCompressed = messageCompressed . _setMessage
+
+            messageCompressed :: Message -> Bool
+            messageCompressed (Message (_, _, att, _, _, _)) = _compressionCodec att /= NoCompression
+
+            decompressSetMember :: MessageSetMember -> Get [MessageSetMember]
+            decompressSetMember (MessageSetMember _ (Message (_, _, att, _, _, Value v))) = case v of
+              Just bytes -> decompressMessage (decompressor att) (_kafkaByteString bytes)
+              Nothing -> fail "Expecting a compressed message set, empty data set received"
+
+            decompressor :: Attributes -> (ByteString -> ByteString)
+            decompressor att = case _compressionCodec att of
+              Gzip -> LB.toStrict . GZip.decompress . LB.fromStrict
+              _ -> error "Unsupported compression codec."
+
+            decompressMessage :: (ByteString -> ByteString) -> ByteString -> Get [MessageSetMember]
+            decompressMessage f = getDecompressedMembers . f
+
+            getDecompressedMembers :: ByteString -> Get [MessageSetMember]
+            getDecompressedMembers "" = return [] -- a compressed empty message
+            getDecompressedMembers val = do
+              let res = runGetPartial deserialize val :: Result MessageSetMember
+              case res of
+                Fail err _ -> fail err
+                Partial _ -> fail "Could not consume all available data"
+                Done v vv -> fmap (v :) (getDecompressedMembers vv)
 
 instance Deserializable MessageSetMember where
   deserialize = do
@@ -383,6 +699,20 @@ instance Deserializable Leader where
     x <- deserialize :: Get Int32
     let l = Leader $ if x == -1 then Nothing else Just x
     return l
+
+instance Deserializable Attributes where
+  deserialize = do
+    i <- deserialize :: Get Int8
+    codec <- case compressionCodecFromValue i of
+      Just c -> return c
+      Nothing -> fail $ "Unknown compression codec value found in: " ++ show i
+    return $ Attributes codec
+
+compressionCodecFromValue :: Int8 -> Maybe CompressionCodec
+compressionCodecFromValue i | eq 1 = Just Gzip
+                            | eq 0 = Just NoCompression
+                            | otherwise = Nothing
+                            where eq y = i .&. y == y
 
 instance Deserializable KafkaBytes where
   deserialize = do
@@ -472,6 +802,8 @@ makeLenses ''Timestamp
 
 makeLenses ''Key
 makeLenses ''Value
+
+makeLenses ''CreateTopicsResponse
 
 makePrisms ''ResponseMessage
 

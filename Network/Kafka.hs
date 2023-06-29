@@ -1,12 +1,17 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE FlexibleContexts #-}
-
 module Network.Kafka where
 
+import Prelude
+
+-- base
 import Control.Applicative
 import Control.Exception (Exception, IOException)
+import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty(..))
+import Data.Monoid ((<>))
+import GHC.Generics (Generic)
+import System.IO
+
+-- Hackage
 import Control.Exception.Lifted (catch)
 import Control.Lens
 import Control.Monad.Trans.Control (MonadBaseControl)
@@ -15,17 +20,13 @@ import Control.Monad.Except (ExceptT(..), runExceptT, MonadError(..))
 import Control.Monad.Trans.State
 import Control.Monad.State.Class (MonadState)
 import Data.ByteString.Char8 (ByteString)
-import Data.List.NonEmpty (NonEmpty(..))
-import qualified Data.List.NonEmpty as NE
-import Data.Monoid ((<>))
 import qualified Data.Pool as Pool
-import System.IO
 import qualified Data.Map as M
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Network
-import Prelude
 
+-- local
 import Network.Kafka.Protocol
 
 type KafkaAddress = (Host, Port)
@@ -52,7 +53,7 @@ data KafkaState = KafkaState { -- | Name to use as a client ID.
                              , _stateTopicMetadata :: M.Map TopicName TopicMetadata
                                -- | Address cache
                              , _stateAddresses :: NonEmpty KafkaAddress
-                             } deriving (Show)
+                             } deriving (Generic, Show)
 
 makeLenses ''KafkaState
 
@@ -70,7 +71,7 @@ data KafkaClientError = -- | A response did not contain an offset.
                       | KafkaInvalidBroker Leader
                       | KafkaFailedToFetchMetadata
                       | KafkaIOException IOException
-                        deriving (Eq, Show)
+                        deriving (Eq, Generic, Show)
 
 instance Exception KafkaClientError
 
@@ -81,25 +82,26 @@ data KafkaTime = -- | The latest time on the broker.
                | EarliestTime
                  -- | A specific time.
                | OtherTime Time
+               deriving (Eq, Generic)
 
 data PartitionAndLeader = PartitionAndLeader { _palTopic :: TopicName
                                              , _palPartition :: Partition
                                              , _palLeader :: Leader
                                              }
-                                             deriving (Show, Eq, Ord)
+                                             deriving (Show, Generic, Eq, Ord)
 
 makeLenses ''PartitionAndLeader
 
 data TopicAndPartition = TopicAndPartition { _tapTopic :: TopicName
                                            , _tapPartition :: Partition
                                            }
-                         deriving (Eq, Ord, Show)
+                         deriving (Eq, Generic, Ord, Show)
 
 -- | A topic with a serializable message.
 data TopicAndMessage = TopicAndMessage { _tamTopic :: TopicName
                                        , _tamMessage :: Message
                                        }
-                       deriving (Eq, Show)
+                       deriving (Eq, Generic, Show)
 
 makeLenses ''TopicAndMessage
 
@@ -185,6 +187,74 @@ metadata request = withAnyHandle $ flip metadata' request
 -- | Send a metadata request.
 metadata' :: Kafka m => Handle -> MetadataRequest -> m MetadataResponse
 metadata' h request = makeRequest h $ MetadataRR request
+
+
+createTopic :: Kafka m => CreateTopicsRequest -> m CreateTopicsResponse
+createTopic request = withAnyHandle $ flip createTopic' request
+
+createTopic' ::
+       Kafka m => Handle -> CreateTopicsRequest -> m CreateTopicsResponse
+createTopic' h request = makeRequest h $ TopicsRR request
+
+createTopicsRequest ::
+       TopicName
+    -> Partition
+    -> ReplicationFactor
+    -> [(Partition, Replicas)]
+    -> [(KafkaString, Metadata)]
+    -> CreateTopicsRequest
+createTopicsRequest topic partition replication_factor replica_assignment config =
+    CreateTopicsReq
+        ([(topic, partition, replication_factor, replica_assignment, config)], defaultRequestTimeout)
+
+deleteTopic :: Kafka m => DeleteTopicsRequest -> m DeleteTopicsResponse
+deleteTopic request = withAnyHandle $ flip deleteTopic' request
+
+deleteTopic' :: Kafka m => Handle -> DeleteTopicsRequest -> m DeleteTopicsResponse
+deleteTopic' h request = makeRequest h $ DeleteTopicsRR request
+
+deleteTopicsRequest :: TopicName -> DeleteTopicsRequest
+deleteTopicsRequest topic = DeleteTopicsReq ([topic], defaultRequestTimeout)
+
+
+fetchOffset :: Kafka m => OffsetFetchRequest -> m OffsetFetchResponse
+fetchOffset request = withAnyHandle $ flip fetchOffset' request
+
+fetchOffset' :: Kafka m => Handle -> OffsetFetchRequest -> m OffsetFetchResponse
+fetchOffset' h request = makeRequest h $ OffsetFetchRR request
+
+fetchOffsetRequest ::
+     ConsumerGroup -> TopicName -> Partition -> OffsetFetchRequest
+fetchOffsetRequest consumerGroup topic partition =
+  OffsetFetchReq
+        (consumerGroup, [(topic, [partition])])
+
+-- | Send a heartbeat request.
+heartbeat :: Kafka m => HeartbeatRequest -> m HeartbeatResponse
+heartbeat request = withAnyHandle $ flip heartbeat' request
+
+heartbeat' :: Kafka m => Handle -> HeartbeatRequest -> m HeartbeatResponse
+heartbeat' h request = makeRequest h $ HeartbeatRR request
+
+-- | Create a heartbeat request.
+heartbeatRequest :: GroupId -> GenerationId -> MemberId -> HeartbeatRequest
+heartbeatRequest genId gId memId = HeartbeatReq (genId, gId, memId)
+
+commitOffset :: Kafka m => OffsetCommitRequest -> m OffsetCommitResponse
+commitOffset request = withAnyHandle $ flip commitOffset' request
+
+commitOffset' ::
+     Kafka m => Handle -> OffsetCommitRequest -> m OffsetCommitResponse
+commitOffset' h request = makeRequest h $ OffsetCommitRR request
+
+commitOffsetRequest ::
+     ConsumerGroup -> TopicName -> Partition -> Offset -> OffsetCommitRequest
+commitOffsetRequest consumerGroup topic partition offset =
+  let time = -1
+      metadata_ = Metadata "milena"
+   in OffsetCommitReq
+        (consumerGroup, [(topic, [(partition, offset, time, metadata_)])])
+
 
 getTopicPartitionLeader :: Kafka m => TopicName -> Partition -> m Broker
 getTopicPartitionLeader t p = do
