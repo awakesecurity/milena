@@ -1,20 +1,19 @@
+{-# LANGUAGE RankNTypes, ScopedTypeVariables #-}
 module Network.Kafka where
 
 import Prelude
 
 -- base
-import Control.Applicative
 import Control.Exception (Exception, IOException, bracketOnError)
 import qualified Data.List.NonEmpty as NE
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Monoid ((<>))
 import GHC.Generics (Generic)
 import System.IO
 
 -- Hackage
 import Control.Exception.Lifted (catch)
 import Control.Lens
-import Control.Monad.Trans.Control (MonadBaseControl)
+import Control.Monad.Trans.Control (MonadBaseControl(..))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Except (ExceptT(..), runExceptT, MonadError(..))
 import Control.Monad.Trans.State
@@ -53,7 +52,7 @@ data KafkaState = KafkaState { -- | Name to use as a client ID.
                              , _stateTopicMetadata :: M.Map TopicName TopicMetadata
                                -- | Address cache
                              , _stateAddresses :: NonEmpty KafkaAddress
-                             } deriving (Generic, Show)
+                             } deriving (Generic)
 
 makeLenses ''KafkaState
 
@@ -333,7 +332,7 @@ withBrokerHandle broker = withAddressHandle (broker2address broker)
 -- Note that when the given action throws an exception, any state changes will
 -- be discarded. This includes both 'IOException's and exceptions thrown by
 -- 'throwError' from 'Control.Monad.Except'.
-withAddressHandle :: Kafka m => KafkaAddress -> (Handle -> m a) -> m a
+withAddressHandle :: forall m a . Kafka m => KafkaAddress -> (Handle -> m a) -> m a
 withAddressHandle address kafkaAction = do
   conns <- use stateConnections
   let foundPool = conns ^. at address
@@ -341,13 +340,21 @@ withAddressHandle address kafkaAction = do
     Nothing -> do
       newPool <- tryKafka $ liftIO $ mkPool address
       stateConnections .= (at address ?~ newPool $ conns)
-      return newPool
-    Just p -> return p
-  tryKafka $ Pool.withResource pool kafkaAction
+      pure newPool
+    Just p -> pure p
+  tryKafka $ withResourcePool pool kafkaAction
     where
+      withResourcePool :: Pool.Pool Handle -> (Handle -> m a) -> m a
+      withResourcePool p f = restoreM =<< liftBaseWith (\k -> Pool.withResource p (k . f))
+
+      createHandle :: (Host, Port) -> IO Handle
+      createHandle (h, p) = connectTo (h ^. hostString) (p ^. portNumber)
+
+      poolConfig :: (Host, Port) -> Pool.PoolConfig Handle
+      poolConfig a = Pool.setNumStripes (Just 1) (Pool.defaultPoolConfig (createHandle a) hClose 10 1)
+
       mkPool :: KafkaAddress -> IO (Pool.Pool Handle)
-      mkPool a = Pool.createPool (createHandle a) hClose 1 10 1
-        where createHandle (h, p) = connectTo (h ^. hostString) (p ^. portNumber)
+      mkPool a = Pool.newPool (poolConfig a)
 
       connectTo :: Network.HostName -> Network.PortNumber -> IO Handle
       connectTo host port = do

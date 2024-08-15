@@ -6,7 +6,6 @@ import qualified Data.Digest.Murmur32 as Murmur32
 import Control.Applicative
 import Control.Lens
 import Control.Monad.Trans (liftIO)
-import Data.Monoid ((<>))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import System.IO
@@ -85,9 +84,12 @@ send l ts = do
   withBrokerHandle broker $ \handle -> produce handle $ produceRequest requiredAcks requestTimeout ts
 
 getRandPartition :: Kafka m => Set PartitionAndLeader -> m (Maybe PartitionAndLeader)
-getRandPartition ps =
-    liftIO $ (ps' ^?) . element <$> getStdRandom (randomR (0, length ps' - 1))
-        where ps' = ps ^.. folded . filtered (has $ palLeader . leaderId . _Just)
+getRandPartition ps = do
+    i <- liftIO (getStdRandom (randomR (0, length ps' - 1)))
+
+    pure (snd <$> (ps' ^@? element i))
+
+    where ps' = ps ^.. folded . filtered (has $ palLeader . leaderId . _Just)
 
 -- * Messages
 

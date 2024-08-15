@@ -44,18 +44,18 @@ library
   ghc-options: -Wall -fwarn-unused-imports -Wincomplete-uni-patterns -Wincomplete-record-updates
   build-depends:
       base >=4.7 && <5
-    , bytestring ==0.10.*
+    , bytestring >=0.10 && <0.12
     , cereal >=0.4 && <0.6
     , containers >=0.5 && <0.7
     , digest >=0.0.1.0 && <0.1
-    , lens >=4.4 && <4.20
+    , lens >=5 && <6
     , lifted-base >=0.2.3.6 && <0.3
     , monad-control ==1.0.*
     , mtl >=2.1 && <2.3
     , murmur-hash >=0.1.0.8 && <0.2
     , network >=2.4 && <3.2
     , random >=1.0 && <1.2
-    , resource-pool >=0.2.3.2 && <0.3
+    , resource-pool >=0.4 && <0.5
     , semigroups >=0.16.2.2 && <0.19
     , transformers >=0.3 && <0.6
     , zlib >=0.6.1.2 && <0.7
