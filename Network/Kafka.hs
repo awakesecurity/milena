@@ -347,9 +347,14 @@ withAddressHandle address kafkaAction = do
       withResourcePool :: Pool.Pool Handle -> (Handle -> m a) -> m a
       withResourcePool p f = restoreM =<< liftBaseWith (\k -> Pool.withResource p (k . f))
 
+      createHandle :: (Host, Port) -> IO Handle
+      createHandle (h, p) = connectTo (h ^. hostString) (p ^. portNumber)
+
+      poolConfig :: (Host, Port) -> Pool.PoolConfig Handle
+      poolConfig a = Pool.setNumStripes (Just 1) (Pool.defaultPoolConfig (createHandle a) hClose 10 1)
+
       mkPool :: KafkaAddress -> IO (Pool.Pool Handle)
-      mkPool a = Pool.createPool (createHandle a) hClose 1 10 1
-        where createHandle (h, p) = connectTo (h ^. hostString) (p ^. portNumber)
+      mkPool a = Pool.newPool (poolConfig a)
 
       connectTo :: Network.HostName -> Network.PortNumber -> IO Handle
       connectTo host port = do
